@@ -1,0 +1,35 @@
+# PDF text extractie (voor PDFs met embedded tekst)
+pdfplumber==0.11.4
+
+# PDF-pagina naar afbeelding (OCR-pad; geen externe Poppler nodig op Windows)
+pymupdf==1.25.5
+
+# OCR engine (wrapper om Tesseract heen)
+pytesseract==0.3.13
+
+# Ollama client voor lokale LLM (qwen2.5:14b) — on-premise, geen cloud
+ollama==0.4.7
+
+# Repareert afgebroken / model-gegenereerde JSON
+json-repair==0.35.0
+
+# Data validatie
+pydantic==2.11.1
+
+# FHIR R4 datamodellen
+fhir.resources==7.1.0
+
+# HTTP client voor HiX API calls
+httpx==0.28.1
+
+# Logging
+loguru==0.7.3
+
+# Omgevingsvariabelen laden uit .env bestand
+python-dotenv==1.1.0
+
+# Afbeeldingsverwerking (OCR / rendering)
+Pillow==11.2.1
+
+# Eenvoudige lokale web-UI
+streamlit==1.44.0

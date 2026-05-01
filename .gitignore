@@ -1,0 +1,28 @@
+# Omgevingsvariabelen — bevatten tokens en wachtwoorden, nooit in git
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Lokaal / runtimedata — niet in versiebeheer
+output/
+logs/
+input/
+presentatie/
+
+# Testdata — bevat echte patiëntdata (NOOIT in git)
+tests/test_pdfs/
+
+# Streamlit-geheimen (lokaal)
+.streamlit/secrets.toml
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
