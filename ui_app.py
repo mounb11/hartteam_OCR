@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -177,6 +178,33 @@ def _run_merged_pdf_uploads(
     return result, out_slug, names
 
 
+def _group_uploads_by_patient(files: list) -> list[tuple[str, list]]:
+    """
+    Groepeer geüploade bestanden op basisnaam zonder afsluitende cijfers.
+
+    Voorbeelden:
+      HENK1.pdf, HENK2.pdf, HENK3.pdf  → groep 'HENK'  (samenvoegen)
+      JAN1.pdf, JAN2.pdf               → groep 'JAN'   (samenvoegen)
+      INGRID.pdf                        → groep 'INGRID' (enkelvoudig)
+
+    Binnen elke groep worden bestanden gesorteerd op numeriek achtervoegsel.
+    """
+    groups: dict[str, list] = {}
+    for f in files:
+        stem = Path(f.name).stem
+        base = re.sub(r'\d+$', '', stem) or stem
+        groups.setdefault(base, []).append(f)
+
+    def _num_suffix(f) -> int:
+        m = re.search(r'(\d+)$', Path(f.name).stem)
+        return int(m.group(1)) if m else 0
+
+    return [
+        (base, sorted(grp, key=_num_suffix))
+        for base, grp in sorted(groups.items())
+    ]
+
+
 def _render_result_summary(result: dict) -> None:
     status = result.get("status", "")
     if status == "completed":
@@ -240,7 +268,7 @@ with tab_run:
         "Modus",
         [
             "Enkel bestand",
-            "Bulk (PDF’s los van elkaar)",
+            "Bulk (meerdere patiënten)",
             "Eén patiënt (PDF’s samenvoegen)",
         ],
         horizontal=True,
@@ -259,12 +287,25 @@ with tab_run:
             _render_result_summary(result)
             _render_json_tabs(result, "hartteam_result.json")
 
-    elif mode == "Bulk (PDF’s los van elkaar)":
+    elif mode == "Bulk (meerdere patiënten)":
         files = st.file_uploader(
-            "PDF’s uploaden (meerdere toegestaan)",
+            "PDF’s uploaden — bestanden met dezelfde naam + getal (bijv. HENK1.pdf, HENK2.pdf) "
+            "worden automatisch als één patiënt samengevoegd; overige bestanden worden individueel verwerkt.",
             type=["pdf"],
             accept_multiple_files=True,
         )
+
+        if files:
+            groups = _group_uploads_by_patient(files)
+            st.markdown(f"**Gedetecteerde groepen ({len(groups)}):**")
+            sep = ", "
+            for base, grp in groups:
+                if len(grp) > 1:
+                    namen = sep.join(f.name for f in grp)
+                    st.markdown(f"- [merge] **{base}** — {namen}")
+                else:
+                    st.markdown(f"- [solo]  **{base}** — {grp[0].name}")
+
         bulk_go = st.button(
             "Verwerk alle PDF’s",
             type="primary",
@@ -272,35 +313,47 @@ with tab_run:
         )
 
         if bulk_go and files:
+            groups = _group_uploads_by_patient(files)
             results: list[dict] = []
             bar = st.progress(0.0, text="Start…")
-            for i, uf in enumerate(files):
-                bar.progress(
-                    i / len(files),
-                    text=f"{i + 1}/{len(files)} — {uf.name}",
-                )
-                with st.spinner(f"Bezig met {uf.name}…"):
-                    r = _run_pdf_bytes(uf.name, uf.getbuffer().tobytes())
-                results.append(
-                    {
+
+            for i, (base, grp) in enumerate(groups):
+                bar.progress(i / len(groups), text=f"{i + 1}/{len(groups)} — {base}")
+
+                if len(grp) == 1:
+                    uf = grp[0]
+                    with st.spinner(f"Bezig met {uf.name}…"):
+                        r = _run_pdf_bytes(uf.name, uf.getbuffer().tobytes())
+                    results.append({
                         "name": uf.name,
                         "slug": resolve_output_slug(Path("."), uf.name),
                         "result": r,
-                    }
-                )
+                    })
+                else:
+                    with st.spinner(f"Samenvoegen en verwerken: {base} ({len(grp)} PDF’s)…"):
+                        r, slug, sources = _run_merged_pdf_uploads(grp, base)
+                    results.append({
+                        "name": base,
+                        "slug": slug,
+                        "result": r,
+                        "is_merged_bundle": True,
+                        "merge_sources": sources,
+                    })
+
             bar.progress(1.0, text="Klaar")
             st.session_state["last_batch"] = results
 
             st.subheader("Overzicht")
             for row in results:
-                st.markdown(
-                    f"- **{row['name']}** — `{row['result'].get('status', '?')}`"
-                )
+                rname = row["name"]
+                rstatus = row["result"].get("status", "?")
+                st.markdown(f"- **{rname}** — `{rstatus}`")
 
             for row in results:
-                with st.expander(f"Inhoud — {row['name']}", expanded=False):
+                rname = row["name"]
+                with st.expander(f"Inhoud — {rname}", expanded=False):
                     _render_result_summary(row["result"])
-                    safe = "".join(c if c.isalnum() or c in ".-_" else "_" for c in row["name"])
+                    safe = "".join(c if c.isalnum() or c in ".-_" else "_" for c in rname)
                     _render_json_tabs(row["result"], f"{safe}_result.json")
 
     else:

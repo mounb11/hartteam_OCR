@@ -6,6 +6,7 @@ config.py
 """
 
 import os
+import platform
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -20,7 +21,7 @@ BASE_DIR = Path(__file__).parent
 INPUT_DIR = BASE_DIR / "input"
 
 # Map waar verwerkte output (JSON) wordt opgeslagen
-OUTPUT_DIR = BASE_DIR / "output"
+OUTPUT_DIR = Path(r"C:\Users\bschalkwijk\OneDrive - LUMC\MDO_efficientie\VerwijsbrievenModelTrial01052026\OutputTrials\Trial_15-05-2026_v3")
 
 # Map voor logs
 LOG_DIR = BASE_DIR / "logs"
@@ -33,9 +34,15 @@ for d in [INPUT_DIR, OUTPUT_DIR, LOG_DIR]:
     d.mkdir(exist_ok=True)
 
 # ── Tesseract OCR ──────────────────────────────────────────────────────────────
-# Op macOS via Homebrew: /opt/homebrew/bin/tesseract
-# Op Linux: /usr/bin/tesseract
-TESSERACT_CMD = os.getenv("TESSERACT_CMD", "/opt/homebrew/bin/tesseract")
+# Stel standaard pad in op basis van OS
+if platform.system() == "Windows":
+    DEFAULT_TESSERACT_CMD = r"C:\Users\bschalkwijk\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+elif platform.system() == "Darwin":  # macOS
+    DEFAULT_TESSERACT_CMD = "/opt/homebrew/bin/tesseract"
+else:  # Linux en andere
+    DEFAULT_TESSERACT_CMD = "/usr/bin/tesseract"
+
+TESSERACT_CMD = os.getenv("TESSERACT_CMD", DEFAULT_TESSERACT_CMD)
 TESSERACT_LANGUAGES = "nld+eng"
 # DPI voor het renderen van PDF-pagina's naar afbeelding voor OCR
 # 300 DPI is standaard voor goede OCR kwaliteit
@@ -62,7 +69,9 @@ SAVE_VERBATIM_TEXT_FILE = os.getenv("SAVE_VERBATIM_TEXT_FILE", "1").strip().lowe
 # Ollama basis-URL — standaard lokaal op poort 11434
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 # Het model dat Ollama gebruikt voor extractie
+# OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:32b")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
+
 # Maximaal aantal tokens dat het model mag genereren als antwoord
 OLLAMA_MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "8192"))
 
@@ -82,3 +91,13 @@ HIX_TIMEOUT_SECONDS = 30
 
 # Of de pipeline stopt bij een fout, of doorgaat met de volgende PDF
 STOP_ON_ERROR = False
+
+# Vraag het model om inhoud die wel in de brontekst stond maar nergens in het schema paste
+# te verzamelen in extractie_metadata.niet_geextraheerd.
+# Zet op False om dit veld weg te laten (sneller, minder tokens).
+EXTRACT_NIET_GEEXTRAHEERD = os.getenv("EXTRACT_NIET_GEEXTRAHEERD", "1").strip().lower() in ("1", "true", "yes")
+
+# Sla naast de normale output ook een geanonimiseerde versie op ({slug}_*_anon.json).
+# Verwijdert patiëntnaam, BSN, adres, geboortedatum, artsnamen en telefoon/e-mail
+# uit alle vrije tekstvelden. De ruwe OCR-tekst wordt niet opgeslagen in de anonieme versie.
+ANONYMIZE_OUTPUT = os.getenv("ANONYMIZE_OUTPUT", "1").strip().lower() in ("1", "true", "yes")

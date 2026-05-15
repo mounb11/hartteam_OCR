@@ -23,6 +23,7 @@ en optioneel onder `output/*_verbatim.txt` (SAVE_VERBATIM_TEXT_FILE).
 from __future__ import annotations
 
 import sys
+import csv
 import json
 from pathlib import Path
 from datetime import datetime
@@ -38,11 +39,41 @@ from config import (
     STOP_ON_ERROR,
     PAGE_JOIN_SEPARATOR,
     SAVE_VERBATIM_TEXT_FILE,
+    ANONYMIZE_OUTPUT,
 )
 from pipeline.pdf_processor import extract_text_from_pdf
 from pipeline.extractor import extract_patient_data
 from pipeline.validator import validate_extracted_data
 from pipeline.fhir_mapper import map_to_fhir
+from pipeline.hartteam_voorbereiding import generate as generate_voorbereiding
+from pipeline.anonymizer import anonymize_extracted, anonymize_document_text
+
+# ── Patiënt-ID mapping (voor geanonimiseerde bestanden) ───────────────────────
+
+_PATIENT_ID_CSV = OUTPUT_DIR / "patient_id_mapping.csv"
+
+
+def _get_or_create_patient_id(patient_name: str) -> str:
+    """Geeft bestaand ID terug voor patient_name, of maakt nieuw sequentieel ID aan."""
+    rows: list[dict] = []
+    if _PATIENT_ID_CSV.exists():
+        with open(_PATIENT_ID_CSV, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+
+    name_lower = patient_name.strip().lower()
+    for row in rows:
+        if row.get("naam", "").strip().lower() == name_lower:
+            return row["ID"]
+
+    new_id = f"PT{len(rows) + 1:03d}"
+    rows.append({"ID": new_id, "naam": patient_name.strip()})
+    with open(_PATIENT_ID_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["ID", "naam"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    logger.info(f"Nieuw patiënt-ID aangemaakt: {new_id} → {patient_name.strip()}")
+    return new_id
 
 
 def pdf_files_under(root: Path) -> list[Path]:
@@ -244,12 +275,14 @@ def _pipeline_llm_validate_fhir(
         logger.error(f"Validatie gefaald: {validation.errors}")
         result["status"] = "validation_failed"
         _save_output(result, pdf_path, suffix="review_required", output_slug=out_slug)
+        _save_anon_output(result, pdf_path, suffix="review_required", output_slug=out_slug)
         return result
 
     if validation.needs_human_review:
         logger.warning("Document gemarkeerd voor menselijke review")
         result["status"] = "needs_review"
         _save_output(result, pdf_path, suffix="needs_review", output_slug=out_slug)
+        _save_anon_output(result, pdf_path, suffix="needs_review", output_slug=out_slug)
         return result
 
     logger.info("Stap 4/4: Mappen naar FHIR R4")
@@ -265,6 +298,8 @@ def _pipeline_llm_validate_fhir(
     result["status"] = "completed"
     logger.success(f"Volledig verwerkt — {completion_log_hint}")
     _save_output(result, pdf_path, output_slug=out_slug)
+    _save_anon_output(result, pdf_path, output_slug=out_slug)
+    _save_voorbereiding(result, pdf_path, output_slug=out_slug)
     return result
 
 
@@ -417,6 +452,88 @@ def _save_output(
     logger.info(f"Resultaat opgeslagen: {output_file.name}")
 
 
+def _save_anon_output(
+    result: dict,
+    pdf_path: Path,
+    suffix: str = "output",
+    *,
+    output_slug: str | None = None,
+) -> None:
+    """Sla geanonimiseerde versie op als {slug}_{suffix}_anon.json.
+
+    Bevat: timestamp, status, validatie, geanonimiseerde extracted data én
+    geanonimiseerde OCR-tekst (full_text en pages_verbatim met PII vervangen).
+    FHIR-bundle wordt niet opgeslagen.
+    """
+    if not ANONYMIZE_OUTPUT:
+        return
+    extracted = result.get("extracted")
+    if not extracted:
+        return
+
+    slug = output_slug if output_slug is not None else json_output_slug_for_pdf(pdf_path)
+    doc = result.get("document") or {}
+
+    # Scrub ruwe tekst — gebruik de originele extractie (vóór anonimisering)
+    # zodat de PII-waarden bekend zijn voor find-replace in de vrije tekst.
+    raw_full_text = doc.get("full_text") or ""
+    anon_full_text = anonymize_document_text(raw_full_text, extracted)
+
+    anon_pages: list[dict] = []
+    for page in doc.get("pages_verbatim") or []:
+        anon_page = dict(page)
+        anon_page["text"] = anonymize_document_text(page.get("text") or "", extracted)
+        anon_pages.append(anon_page)
+
+    anon_result = {
+        "timestamp": result.get("timestamp"),
+        "status": result.get("status"),
+        "document": {
+            "pages": doc.get("pages"),
+            "methods": doc.get("methods"),
+            "total_chars": doc.get("total_chars"),
+            "full_text": anon_full_text,
+            "pages_verbatim": anon_pages,
+        },
+        "extracted": anonymize_extracted(extracted),
+        "validation": result.get("validation"),
+    }
+
+    patient = extracted.get("patient") or {}
+    voornaam = (patient.get("voornaam") or "").strip()
+    achternaam = (patient.get("achternaam") or "").strip()
+    if achternaam or voornaam:
+        patient_name = f"{achternaam} {voornaam}".strip()
+        anon_slug = _get_or_create_patient_id(patient_name)
+    else:
+        anon_slug = slug
+
+    output_file = OUTPUT_DIR / f"{anon_slug}_{suffix}_anon.json"
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(anon_result, f, indent=2, ensure_ascii=False)
+    logger.info(f"Geanonimiseerde versie opgeslagen: {output_file.name}")
+
+
+def _save_voorbereiding(
+    result: dict,
+    pdf_path: Path,
+    *,
+    output_slug: str | None = None,
+) -> None:
+    """Genereer en sla de hartteam-voorbereiding op als .txt naast de JSON."""
+    extracted = result.get("extracted")
+    if not extracted:
+        return
+    slug = output_slug if output_slug is not None else json_output_slug_for_pdf(pdf_path)
+    txt_path = OUTPUT_DIR / f"{slug}_voorbereiding.txt"
+    try:
+        tekst = generate_voorbereiding(extracted)
+        txt_path.write_text(tekst, encoding="utf-8")
+        logger.info(f"Hartteam-voorbereiding opgeslagen: {txt_path.name}")
+    except Exception as e:
+        logger.warning(f"Voorbereiding genereren mislukt: {e}")
+
+
 def validation_result_to_dict(v) -> dict:
     return {
         "is_valid": v.is_valid,
@@ -462,6 +579,9 @@ def merge_extracted_and_finalize(
             _save_output(
                 out, pdf_path_for_slug, suffix="review_required", output_slug=output_slug
             )
+            _save_anon_output(
+                out, pdf_path_for_slug, suffix="review_required", output_slug=output_slug
+            )
         return out
 
     allow_fhir = (not validation.needs_human_review) or accept_warnings_for_fhir
@@ -470,6 +590,7 @@ def merge_extracted_and_finalize(
         out["status"] = "needs_review"
         if save:
             _save_output(out, pdf_path_for_slug, suffix="needs_review", output_slug=output_slug)
+            _save_anon_output(out, pdf_path_for_slug, suffix="needs_review", output_slug=output_slug)
         return out
 
     try:
@@ -478,6 +599,8 @@ def merge_extracted_and_finalize(
         logger.success(f"Na handmatige wijziging: FHIR klaar ({pdf_path_for_slug.name})")
         if save:
             _save_output(out, pdf_path_for_slug, output_slug=output_slug)
+            _save_anon_output(out, pdf_path_for_slug, output_slug=output_slug)
+            _save_voorbereiding(out, pdf_path_for_slug, output_slug=output_slug)
     except Exception as e:
         logger.error(f"FHIR na handmatige wijziging mislukt: {e}")
         out["status"] = "failed"
